@@ -945,6 +945,20 @@ defmodule Batata.Lift do
     end
   end
 
+  # Remote stdlib call: `Kernel.length(x)` / `List.first(x)` / `Enum.count(x)`.
+  # Module-qualified calls resolve through the stdlib domain registry; anything
+  # outside the declared surface raises explicitly.
+  defp lift_expr({{:., _, [mod_ast, fun]}, _, args}, ctx, block, env)
+       when is_atom(fun) and is_list(args) do
+    case module_ref(mod_ast) do
+      {:ok, module} ->
+        lift_stdlib_call(module, fun, args, ctx, block, env)
+
+      :error ->
+        raise Error, "unsupported AST in the current slice: #{inspect(mod_ast)}.#{fun}"
+    end
+  end
+
   defp lift_expr({:self, _, []}, ctx, block, env) do
     {create_op("ex.self", [], [ex_type("dyn", ctx)], ctx, block), env}
   end
@@ -1040,27 +1054,34 @@ defmodule Batata.Lift do
   end
 
   defp lift_expr({name, _, args}, ctx, block, env) when is_atom(name) and is_list(args) do
-    {arg_values, env} =
-      Enum.map_reduce(args, env, fn arg, env ->
-        {value, env} = lift_expr(arg, ctx, block, env)
-        {lift_value(value, ctx, block, env), env}
-      end)
+    if Batata.Stdlib.class({Kernel, name, length(args)}) == :native_term do
+      # Kernel auto-imported BIFs (length/1, hd/1, ...) resolve through the
+      # stdlib registry; user definitions of the same name are not visible in
+      # this slice, matching the existing self/0 and send/2 special cases.
+      lift_stdlib_call(Kernel, name, args, ctx, block, env)
+    else
+      {arg_values, env} =
+        Enum.map_reduce(args, env, fn arg, env ->
+          {value, env} = lift_expr(arg, ctx, block, env)
+          {lift_value(value, ctx, block, env), env}
+        end)
 
-    {
-      create_op(
-        "ex.call",
-        arg_values ++
-          [
-            callee: MLIR.Attribute.string(to_string(name)),
-            arity: MLIR.Attribute.integer(MLIR.Type.i64(), length(args)),
-            operandSegmentSizes: segment_sizes(arg_segment_sizes(length(args)))
-          ],
-        [ex_type("dyn", ctx)],
-        ctx,
-        block
-      ),
-      env
-    }
+      {
+        create_op(
+          "ex.call",
+          arg_values ++
+            [
+              callee: MLIR.Attribute.string(to_string(name)),
+              arity: MLIR.Attribute.integer(MLIR.Type.i64(), length(args)),
+              operandSegmentSizes: segment_sizes(arg_segment_sizes(length(args)))
+            ],
+          [ex_type("dyn", ctx)],
+          ctx,
+          block
+        ),
+        env
+      }
+    end
   end
 
   defp lift_expr({name, _, nil}, _ctx, _block, env) when is_atom(name) do
@@ -1098,6 +1119,101 @@ defmodule Batata.Lift do
   end
 
   defp catch_all_clause?(_clause), do: false
+
+  defp module_ref({:__aliases__, _, [module]}) when is_atom(module),
+    do: {:ok, Module.concat([module])}
+
+  defp module_ref({:__aliases__, _, [:"Elixir", module]}) when is_atom(module),
+    do: {:ok, Module.concat([:"Elixir", module])}
+
+  defp module_ref(module) when is_atom(module), do: {:ok, module}
+  defp module_ref(_), do: :error
+
+  # Resolves a module-qualified stdlib call through the domain registry.
+  defp lift_stdlib_call(module, fun, args, ctx, block, env) do
+    case Batata.Stdlib.class({module, fun, length(args)}) do
+      :native_term ->
+        {values, env} = lift_operands_boxed(args, ctx, block, env)
+        {native_term_call(module, fun, values, ctx, block), env}
+
+      :beamer_callback ->
+        raise Error,
+              "stdlib call #{inspect(module)}.#{fun}/#{length(args)} requires BEAM callback " <>
+                "interop (protocol consolidation), not yet supported"
+
+      :unsupported ->
+        raise Error,
+              "stdlib call #{inspect(module)}.#{fun}/#{length(args)} is declared but not yet " <>
+                "supported in this slice"
+
+      nil ->
+        raise Error,
+              "unsupported stdlib call: #{inspect(module)}.#{fun}/#{length(args)}"
+    end
+  end
+
+  # Lowering for `:native_term` registry entries: operands arrive boxed as
+  # `!ex.dyn` words, results are either scalar i64 or `!ex.dyn`.
+  defp native_term_call(_module, :length, [value], ctx, block),
+    do: create_op("ex.list_length", [value], [MLIR.Type.i64()], ctx, block)
+
+  defp native_term_call(_module, :hd, [value], ctx, block),
+    do: create_op("ex.list_head", [value], [ex_type("dyn", ctx)], ctx, block)
+
+  defp native_term_call(_module, :tl, [value], ctx, block),
+    do: create_op("ex.list_tail", [value], [ex_type("dyn", ctx)], ctx, block)
+
+  defp native_term_call(_module, :tuple_size, [value], ctx, block),
+    do: create_op("ex.tuple_length", [value], [MLIR.Type.i64()], ctx, block)
+
+  defp native_term_call(Map, :size, [value], ctx, block),
+    do: create_op("ex.map_length", [value], [MLIR.Type.i64()], ctx, block)
+
+  defp native_term_call(Tuple, :size, [value], ctx, block),
+    do: create_op("ex.tuple_length", [value], [MLIR.Type.i64()], ctx, block)
+
+  defp native_term_call(_module, :byte_size, [value], ctx, block),
+    do: create_op("ex.binary_length", [value], [MLIR.Type.i64()], ctx, block)
+
+  defp native_term_call(_module, :map_size, [value], ctx, block),
+    do: create_op("ex.map_length", [value], [MLIR.Type.i64()], ctx, block)
+
+  defp native_term_call(_module, :elem, [tuple, index], ctx, block) do
+    index_int = create_op("ex.to_int", [index], [MLIR.Type.i64()], ctx, block)
+    index0 = create_op("ex.sub", [index_int, lit(1, ctx, block)], [MLIR.Type.i64()], ctx, block)
+    create_op("ex.tuple_get", [tuple, index0], [ex_type("dyn", ctx)], ctx, block)
+  end
+
+  defp native_term_call(_module, :is_atom, [value], ctx, block),
+    do: create_op("ex.is_atom", [value], [MLIR.Type.i64()], ctx, block)
+
+  defp native_term_call(_module, :is_binary, [value], ctx, block),
+    do: create_op("ex.is_binary", [value], [MLIR.Type.i64()], ctx, block)
+
+  defp native_term_call(_module, :is_integer, [value], ctx, block),
+    do: create_op("ex.is_integer", [value], [MLIR.Type.i64()], ctx, block)
+
+  defp native_term_call(_module, :is_list, [value], ctx, block),
+    do: create_op("ex.is_list", [value], [MLIR.Type.i64()], ctx, block)
+
+  defp native_term_call(_module, :is_map, [value], ctx, block),
+    do: create_op("ex.is_map", [value], [MLIR.Type.i64()], ctx, block)
+
+  defp native_term_call(_module, :is_tuple, [value], ctx, block),
+    do: create_op("ex.is_tuple", [value], [MLIR.Type.i64()], ctx, block)
+
+  defp native_term_call(_module, :first, [value], ctx, block),
+    do: create_op("ex.list_head", [value], [ex_type("dyn", ctx)], ctx, block)
+
+  defp native_term_call(_module, :self, [], ctx, block),
+    do: create_op("ex.self", [], [ex_type("dyn", ctx)], ctx, block)
+
+  defp native_term_call(_module, :send, [pid, msg], ctx, block),
+    do: create_op("ex.send", [pid, msg], [ex_type("dyn", ctx)], ctx, block)
+
+  defp native_term_call(module, fun, _args, _ctx, _block) do
+    raise Error, "no native_term lowering for #{inspect(module)}.#{fun}"
+  end
 
   defp resolve_fun_ref({name, _, nil}, env) when is_atom(name) do
     case Map.get(env, name) do

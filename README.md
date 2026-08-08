@@ -39,6 +39,19 @@ The pipeline now has an explicit transform layer between lift and lowering
   in the scalar slice, so `ex.call` results (typed `!ex.dyn`) can feed
   arithmetic — e.g. `add(1, 2) + 3` compiles to 6.
 
+M3 starts the stdlib domain registry (see
+[tsai/beaver#6](https://localhost:3000/tsai/beaver/issues/6)):
+
+- `Batata.Stdlib` declares which `{module, function, arity}` entries are
+  natively replaceable (`:native_term`), which await the BEAM callback bridge
+  (`:beamer_callback`, e.g. `Enum`), and which are declared-but-unlowered
+  (`:unsupported`); anything outside the surface raises explicitly at lift;
+- module-qualified calls (`Kernel.length/1`, `List.first/1`, ...) and
+  auto-imported Kernel BIFs (`length/1`, `hd/1`, `elem/2`, `map_size/1`, ...)
+  resolve through the registry and lower to `ex.term.*` runtime intrinsics;
+- the first slice added `ex.map_length` (`map_size`/`Map.size`) to the Zig
+  runtime, completing the read-intrinsic family for tuple/list/map/binary.
+
 ## Dev setup
 
 ## Dev setup

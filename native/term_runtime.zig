@@ -298,6 +298,12 @@ pub export fn ex_term_tuple_length(tuple: i64) i64 {
     return @intCast(tuple_len(tuple));
 }
 
+/// Returns the pair count of a map word; 0 for non-maps.
+pub export fn ex_term_map_length(map: i64) i64 {
+    if (word_tag(map) != tag_map) return 0;
+    return @intCast(map_len(map));
+}
+
 /// Returns the head of a list word; nil for non-lists or the empty list.
 pub export fn ex_term_list_head(list: i64) i64 {
     if (word_tag(list) != tag_list) return nil_word;
@@ -537,6 +543,7 @@ comptime {
     @export(&ex_term_tuple_from_list, .{ .name = "ex.term.tuple_from_list" });
     @export(&ex_term_tuple_get, .{ .name = "ex.term.tuple_get" });
     @export(&ex_term_tuple_length, .{ .name = "ex.term.tuple_length" });
+    @export(&ex_term_map_length, .{ .name = "ex.term.map_length" });
     @export(&ex_term_list_head, .{ .name = "ex.term.list_head" });
     @export(&ex_term_list_tail, .{ .name = "ex.term.list_tail" });
     @export(&ex_term_list_length, .{ .name = "ex.term.list_length" });
@@ -616,6 +623,12 @@ test "term ABI reads" {
     try std.testing.expectEqual(@as(i64, 1), ex_term_is_list(ex_term_list_tail(ex_term_list_tail(list))));
     try std.testing.expectEqual(@as(i64, 0), ex_term_list_length(nil_word));
     try std.testing.expectEqual(@as(i64, 1), ex_term_is_nil_word(ex_term_list_head(nil_word)));
+
+    // map reads
+    const entries = ex_term_list_cons(one, ex_term_list_cons(two, nil_word));
+    const map = ex_term_map_from_list(entries);
+    try std.testing.expectEqual(@as(i64, 1), ex_term_map_length(map));
+    try std.testing.expectEqual(@as(i64, 0), ex_term_map_length(one));
 
     // word equality
     try std.testing.expectEqual(@as(i64, 1), ex_term_eq(one, one));

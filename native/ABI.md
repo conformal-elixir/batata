@@ -53,6 +53,7 @@ All functions use the C ABI and return/accept `i64` tagged words unless noted.
 | `ex.term.tuple_from_list` | `(list: i64) -> i64` | proper list -> tuple |
 | `ex.term.tuple_get` | `(tuple: i64, index: i64) -> i64` | element at index; nil when out of range or not a tuple |
 | `ex.term.tuple_length` | `(tuple: i64) -> i64` | tuple arity; 0 for non-tuples |
+| `ex.term.map_length` | `(map: i64) -> i64` | map pair count; 0 for non-maps |
 | `ex.term.jmp_buf_size` | `() -> i64` | byte size of libc `jmp_buf`, for stack allocation in compiled code |
 | `ex.term.setjmp_addr` | `() -> i64` | address of libc `setjmp`, for indirect calls that avoid ORC symbol resolution |
 | `ex.term.try_push` | `(buf: ptr) -> i64` | push a setjmp buffer for a try region; -1 when the 16-slot stack is full |
